@@ -15,6 +15,7 @@ var (
     filePath *string
     goroutineNum *int
     readingChunkSize *uint64
+    outputDir *string
 )
 
 func init() {
@@ -24,7 +25,9 @@ func init() {
     debug := flag.Bool("debug", false, "Run in debug mode.")
     filePath = flag.String("path", "./demo.txt", "The FILE to read.")
     goroutineNum = flag.Int("c", 1, "Concurrency, the total of goroutines.")
-    readingChunkSize = flag.Uint64("chunk", 4096, "Bytes need reading per Read() calling.")
+    readingChunkSize = flag.Uint64("chunk", 4096, "Bytes need reading per Read() calling. 2M - 2097152, 4M - 4194304, 8M - 8388608, 16M - 16777216, 32M - 33554432.")
+
+    outputDir = flag.String("out", "./out", "Set output directiory.")
     flag.Parse()
 
     if *debug {
@@ -37,12 +40,14 @@ func init() {
 
 
 func main() {
-    //mLog.Fatal().Msg("test fatal")
-    //mLog.Panic().Msg("test panic")
     mLog.Debug().Msg("hello super reader.")
 
     reader := super_io.NewFileReader(filePath, *goroutineNum, *readingChunkSize)
     mLog.Debug().Msgf("reader: %+v", reader)
 
-    reader.ReadAsJsonL()//.LogResult().LogTimer()
+    //reader.ReadAsJsonL()
+    reader.ReadAsJsonL().
+        LogResult().LogTimer().IndexResultsWithSimHash()
+
+    reader.WriteDedupResult(outputDir)
 }
