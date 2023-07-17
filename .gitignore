@@ -1,4 +1,6 @@
 *.jsonl
 *.txt
-super_reader
 get_fbsize
+*.log
+super_reader/super_reader
+*.err
