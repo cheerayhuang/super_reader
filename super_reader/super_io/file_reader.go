@@ -22,6 +22,12 @@ import (
 	"super_reader/simhash"
 )
 
+type Result struct {
+    SimHash uint64
+    SegKeys []uint16
+
+    ResBytes []byte
+}
 
 type FileReader struct {
     FileName string
@@ -31,17 +37,18 @@ type FileReader struct {
     lenSlices int
     readingChunkSize uint64
 
-    results [][]byte
+    //results [][]byte
+    results []*Result
 
     wg sync.WaitGroup
 
-    resChan chan []byte
+    resChan chan *Result
     resAsyncStop chan bool
 
     perfElapsed time.Duration
 
     resIndices *simhash.SimHashIndex
-    resDedupBySimHash [][]byte
+    resDedupBySimHash []*Result
 
     countSlicesClosed int32
 }
@@ -75,8 +82,8 @@ func NewFileReader(path *string, goroutineNum int, readingChunkSize uint64) *Fil
     if readingChunkSize >= uint64(sliceSize) {
         f.readingChunkSize = uint64(sliceSize / 3)
     }
-    f.results = make([][]byte, 0)
-    f.resChan = make(chan []byte, f.lenSlices*10)
+    f.results = make([]*Result, 0)
+    f.resChan = make(chan *Result, f.lenSlices*10)
     f.resAsyncStop = make(chan bool, 1)
 
     var seekIndex int64 = 0
@@ -89,6 +96,9 @@ func NewFileReader(path *string, goroutineNum int, readingChunkSize uint64) *Fil
     }
     f.readingSlices[goroutineNum] = uint64(fileSize)
 
+    f.resIndices = simhash.NewSimHashIndex()
+    f.resDedupBySimHash = make([]*Result, 0)
+
     return f
 }
 
@@ -97,58 +107,83 @@ func (f *FileReader) Read(p []byte) (n int, err error) {
     return 0, nil
 }
 
-/*
-func (f *FileReader) indexResultsWithSimHash(r []byte) {
-    res, seg := simhash.SimHashBytes(r)
+func (f *FileReader) constructIndices(r []byte) *Result {
+    s, seg := simhash.SimHashBytes(r)
+    mLog.Debug().Msgf("simhash: %x, seg: %v", s, seg)
 
     m := new(simhash.LineMeta)
-    m.SimHash = res
-
-    found, _ := f.resIndices.NearBy(m, seg)
-    if found != nil {
-        mLog.Warn().Str("similar text", string(r[0:len(r)/10])).Msgf("Similarity: %x, %x.", res, found[0].SimHash)
-
-        return
-    }
+    m.SimHash = s
 
     f.resIndices.Insert(m, seg)
 
-    f.resDedupLock.Lock()
-    f.resDedupBySimHash = append(f.resDedupBySimHash, r)
-    f.resDedupLock.Unlock()
+    res := new(Result)
+    res.SimHash = s
+    res.SegKeys = seg
+    res.ResBytes = r
 
-    mLog.Debug().Msgf("simhash: %x, seg: %v", res, seg)
-    return
-}*/
+    //f.results = append(f.results, res)
+    return res
+}
 
-func (f *FileReader) IndexResultsWithSimHash() (*FileReader) {
-    f.resIndices = simhash.NewSimHashIndex()
-    f.resDedupBySimHash = make([][]byte, 0)
+func (f *FileReader) DedupResultsWithSimHash(dupNum int) (*FileReader) {
 
-    for i, r := range f.results {
-        res, seg := simhash.SimHashBytes(r)
-        mLog.Debug().Msgf("simhash: %x, seg: %v", res, seg)
-
-        m := new(simhash.LineMeta)
-        m.SimHash = res
-
-        found, _ := f.resIndices.NearBy(m, seg)
-        if found != nil {
-            mLog.Info().Msgf("Similarity: %x, %x.", res, found[0].SimHash)
-            continue
-        }
-
-        f.resIndices.Insert(m, seg)
-
-        f.resDedupBySimHash = append(f.resDedupBySimHash, r)
-
-        if i % (5*10000) == 0{
-           mLog.Log().Msgf("Already index %d results.", i)
+    lenSubRes := len(f.results) / f.lenSlices
+    ch := make(chan *Result, f.lenSlices*10)
+    stopCh := make(chan bool, 1)
+    for i := 0; i < f.lenSlices; i++ {
+        f.wg.Add(1)
+        if (i == f.lenSlices-1) {
+            go f.dedupSubRes(f.results[i*lenSubRes:], dupNum, ch, stopCh)
+        } else {
+            go f.dedupSubRes(f.results[i*lenSubRes:(i+1)*lenSubRes], dupNum, ch, stopCh)
         }
     }
 
+    dedupSubResDone := 0
+    for {
+        needClosing := false
+        select {
+        case r := <- ch:
+            f.resDedupBySimHash = append(f.resDedupBySimHash, r)
+
+        case <-stopCh:
+            dedupSubResDone++
+            if dedupSubResDone == f.lenSlices {
+                needClosing = true
+                break
+            }
+
+        default:
+        }
+
+        if needClosing {
+            close(ch)
+            close(stopCh)
+            break
+        }
+    }
+    f.wg.Wait()
+
     mLog.Log().Int("Total dedup results", len(f.resDedupBySimHash)).Send()
     return f
+}
+
+func (f *FileReader) dedupSubRes(subResults []*Result, dupNum int, ch chan *Result, stopCh chan bool) {
+    defer f.wg.Done()
+
+    for _, r := range subResults {
+        m := new(simhash.LineMeta)
+        m.SimHash = r.SimHash
+
+        if res, _ := f.resIndices.NearBy(m, r.SegKeys, dupNum);  res != nil {
+            mLog.Info().Msgf("[%x] is similar with [%x]", m.SimHash, res[0].SimHash)
+            continue
+        }
+
+        ch <- r
+    }
+
+    stopCh <- true
 }
 
 func (f *FileReader) ReadAsJsonL() (*FileReader) {
@@ -205,7 +240,7 @@ func (f *FileReader) WriteDedupResult(outputDir *string) {
     f.wg.Wait()
 }
 
-func (f *FileReader) writeResLine(subRes [][]byte, path string) {
+func (f *FileReader) writeResLine(subRes []*Result, path string) {
     defer f.wg.Done()
 
     outFile, err := os.Create(path)
@@ -216,7 +251,7 @@ func (f *FileReader) writeResLine(subRes [][]byte, path string) {
 
     w := bufio.NewWriter(outFile)
     for _, r := range subRes  {
-        w.WriteString(string(r)+"\n")
+        w.WriteString(string(r.ResBytes)+"\n")
     }
 
     w.Flush()
@@ -236,8 +271,8 @@ func (f *FileReader) LogTimer() (*FileReader) {
 
 func (f *FileReader) LogResult() (*FileReader) {
     for i, r := range f.results {
-        mLog.Info().Int("lineNum", i+1).Str("line", string(r[0:len(r)/10])+string(r[len(r)/10*9:])).Send()
-        if r[len(r)-1] != '}' {
+        mLog.Info().Int("lineNum", i+1).Str("line", string(r.ResBytes[0:len(r.ResBytes)/10])+string(r.ResBytes[len(r.ResBytes)/10*9:])).Send()
+        if r.ResBytes[len(r.ResBytes)-1] != '}' {
             mLog.Error().Int("lineNum", i+1).Msg("read data lines ERROR!")
         }
     }
@@ -252,7 +287,7 @@ func (f *FileReader) asyncResults() {
 
     re := regexp.MustCompile(`^(\d+)#END$`)
     for r := range f.resChan {
-        if matchRes := re.FindSubmatch(r); matchRes != nil {
+        if matchRes := re.FindSubmatch(r.ResBytes); matchRes != nil {
             goIndex, _ := strconv.Atoi(string(matchRes[1]))
             f.FHandlers[goIndex].Close()
             f.FHandlers[goIndex] = nil
@@ -332,7 +367,8 @@ func (f* FileReader) reading(goIndex int) {
 
             resline := make([]byte, len(l))
             copy(resline, l)
-            f.resChan <- resline
+            r := f.constructIndices(resline)
+            f.resChan <- r
 
             //mLog.Debug().Int("go", goIndex).RawJSON("line", l).Send()
             mLog.Debug().Int("go", goIndex).Msgf("line: %s", string(l[0:len(l)/10]))
@@ -348,7 +384,9 @@ func (f* FileReader) reading(goIndex int) {
             bufpool.Put(buf)
         }
     }
-    f.resChan <- []byte(strconv.Itoa(goIndex)+"#END")
+    endR := new(Result)
+    endR.ResBytes = []byte(strconv.Itoa(goIndex)+"#END")
+    f.resChan <- endR
     mLog.Log().Msgf("go: %d END.", goIndex)
 }
 

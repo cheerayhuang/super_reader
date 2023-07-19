@@ -63,13 +63,15 @@ func (s *SimHashIndex) Insert(m *LineMeta, keys []uint16) error {
     keyHi32 := (uint32(keys[0]) << 16) + uint32(keys[1])
     keyLo32 := (uint32(keys[2]) << 16) + uint32(keys[3])
 
+    indexRwLock.Lock()
     s.indexHi32[keyHi32] = append(s.indexHi32[keyHi32], m)
-    s.indexLo32[keyLo32] = append(s.indexHi32[keyLo32], m)
+    s.indexLo32[keyLo32] = append(s.indexLo32[keyLo32], m)
+    indexRwLock.Unlock()
 
     return nil
 }
 
-func (s* SimHashIndex) NearBy(m *LineMeta, keys []uint16) (LineMetaList, error) {
+func (s* SimHashIndex) NearBy(m *LineMeta, keys []uint16, dupNum int) (LineMetaList, error) {
 
     //resMap := make(map[*LineMeta]bool)
     //indexRwLock.RLock()
@@ -77,6 +79,13 @@ func (s* SimHashIndex) NearBy(m *LineMeta, keys []uint16) (LineMetaList, error) 
 
     keyHi32 := (uint32(keys[0]) << 16) + uint32(keys[1])
     keyLo32 := (uint32(keys[2]) << 16) + uint32(keys[3])
+
+    lenIndexHi32 := len(s.indexHi32[keyHi32])
+    lenIndexLo32 := len(s.indexLo32[keyLo32])
+
+    if lenIndexHi32 == 0 && lenIndexLo32 == 0 {
+        return nil, nil
+    }
 
     if len(s.indexHi32[keyHi32]) > 5000 || len(s.indexLo32[keyLo32]) > 5000 {
         mLog.Warn().
@@ -87,8 +96,8 @@ func (s* SimHashIndex) NearBy(m *LineMeta, keys []uint16) (LineMetaList, error) 
     resChan1 := make(chan LineMetaList, 1)
     resChan2 := make(chan LineMetaList, 1)
 
-    go s.lookup(m, s.indexHi32[keyHi32], resChan1)
-    go s.lookup(m, s.indexLo32[keyLo32], resChan2)
+    go s.lookup(m, s.indexHi32[keyHi32], dupNum, resChan1)
+    go s.lookup(m, s.indexLo32[keyLo32], dupNum, resChan2)
 
     resCount := 0
     for {
@@ -138,11 +147,15 @@ func (s* SimHashIndex) NearBy(m *LineMeta, keys []uint16) (LineMetaList, error) 
     return nil, nil
 }
 
-func (s *SimHashIndex) lookup(m *LineMeta, l LineMetaList, resChan chan LineMetaList) {
+func (s *SimHashIndex) lookup(m *LineMeta, l LineMetaList, dupNum int, resChan chan LineMetaList) {
     r := make(LineMetaList, 0)
     for _, v := range l {
         //if !resMap[v] && distance(m.SimHash, v.SimHash) <= 3 {
-        if distance(m.SimHash, v.SimHash) < dupThreshold {
+        if dupNum == 2 && m.SimHash == v.SimHash {
+            dupNum--
+            continue
+        }
+        if m.SimHash == v.SimHash || distance(m.SimHash, v.SimHash) < dupThreshold {
             r = append(r, v)
             resChan <- r
             return

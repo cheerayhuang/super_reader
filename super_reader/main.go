@@ -16,6 +16,7 @@ var (
     goroutineNum *int
     readingChunkSize *uint64
     outputDir *string
+    dupNum *int
 )
 
 func init() {
@@ -28,6 +29,7 @@ func init() {
     readingChunkSize = flag.Uint64("chunk", 4096, "Bytes need reading per Read() calling. 2M - 2097152, 4M - 4194304, 8M - 8388608, 16M - 16777216, 32M - 33554432.")
 
     outputDir = flag.String("out", "./out", "Set output directiory.")
+    dupNum = flag.Int("dupnum", 1, "Set to 2, when dedup itself.")
     flag.Parse()
 
     if *debug {
@@ -47,7 +49,7 @@ func main() {
 
     //reader.ReadAsJsonL()
     reader.ReadAsJsonL().
-        LogResult().LogTimer().IndexResultsWithSimHash()
+        LogResult().LogTimer().DedupResultsWithSimHash(*dupNum)
 
     reader.WriteDedupResult(outputDir)
 }
